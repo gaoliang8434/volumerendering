@@ -1,0 +1,1817 @@
+
+
+#include <iostream>
+#include <algorithm>
+#include "VolumeGeometry.h"
+#include "ImplicitVolumeShapes.h"
+#include "GridVolumes.h"
+#include "ProgressMeter.h"
+#include "UniformPRN.h"
+#include "GeometryVolumeShapes.h"
+
+using namespace std;
+using namespace lux;
+
+
+
+const bool Triangle::Intersected( const Vector& P, const Vector& D ) const
+{
+	Vector E1 = D^du ; 
+	Vector E2 = D^dv; 
+	Vector Y = D^(P - P0);
+
+	double E1E1 = E1*E1;
+	double E2E2 = E2*E2;
+	double E1E2 = E1*E2;
+	double denom = E1E1*E2E2 - E1E2*E1E2;
+
+	if( fabs(denom) < 1.0e-10 ){ return false; }
+
+        double YE1 = Y*E1;
+	double YE2 = Y*E2;
+	double u = ( YE1*E2E2 - YE2*E1E2 ) / denom;
+	if( u < 1.0e-3 || u > 1 ){ return false; }
+	double v = ( YE2*E1E1 - YE1*E1E2 ) / denom;
+	if( v < 1.0e-3 || v > 1 ){ return false; }
+	double t = (P0-P+u*du+v*dv)*D/(D*D);
+	if( t < 1.0e-3 ){ return false; }
+        return true; 
+}
+
+void TriangleGeometry::addVertex( const Vector& v )
+{
+   Vector vscaled = v * scal;
+   vertices.push_back(vscaled);
+   if( vertices.size() == 1 )
+   {
+      llc = vscaled;
+      urc = vscaled;
+   }
+   else
+   {
+      llc[0] = ( llc[0] < vscaled[0] ) ? llc[0] : vscaled[0];
+      llc[1] = ( llc[1] < vscaled[1] ) ? llc[1] : vscaled[1];
+      llc[2] = ( llc[2] < vscaled[2] ) ? llc[2] : vscaled[2];
+
+      urc[0] = ( urc[0] > vscaled[0] ) ? urc[0] : vscaled[0];
+      urc[1] = ( urc[1] > vscaled[1] ) ? urc[1] : vscaled[1];
+      urc[2] = ( urc[2] > vscaled[2] ) ? urc[2] : vscaled[2];
+   }
+}
+
+
+void TriangleGeometry::addNormal( const Vector& v )
+{
+   normals.push_back(v);
+}
+
+
+void TriangleGeometry::computeConnectivity()
+{
+   connectivity.clear();
+   std::vector<int> blank;
+   for( size_t i=0;i<vertices.size();i++ ){ connectivity.push_back( blank ); }
+
+   // this approach generates duplicates
+   for( size_t f=0;f<faces.size();f++ )
+   {
+      const Face& F = faces[f];
+
+      for( size_t j=0;j<F.size();j++ )
+      {
+         std::vector<int>& C = connectivity[F[j]];
+	 int test0 = F[(j+1)%3];
+	 int test1 = F[(j+2)%3];
+	 bool hasIt = false;
+         for( size_t k=0;k<C.size();k++ )
+	 {
+	    if( (C[k] == test0) ){ hasIt = true; }
+	 }
+
+	 if( !hasIt ){ C.push_back( test0 ); }
+	 hasIt = false;
+         for( size_t k=0;k<C.size();k++ )
+	 {
+	    if( (C[k] == test1) ){ hasIt = true; }
+	 }
+	 if( !hasIt ){ C.push_back( test1 ); }
+      }
+   }
+}
+
+
+const float TriangleGeometry::averageNeighborDistance( int i ) const
+{
+   float avg = 0;
+   const std::vector<int>& C = connectivity[i];
+   for( size_t j=0;j<C.size();j++ )
+   {
+      avg += (vertices[i]-vertices[C[j]]).magnitude();
+   }
+   if( !C.empty() ){ avg /= C.size(); }
+   return avg;
+}
+
+
+
+void TriangleGeometry::addTextureCoordinate( const Vector& v )
+{
+   textureCoordinates.push_back(v);
+}
+
+
+
+
+
+void TriangleGeometry::translate( const Vector& t )
+{
+    for( size_t i=0;i<vertices.size();i++ )
+    {
+       vertices[i] += t;
+    }
+    llc += t;
+    urc += t;
+}
+
+void TriangleGeometry::rotate( const Vector& t )
+{
+    Vector that = t.unitvector();
+    double tmag = t.magnitude();
+    for( size_t i=0;i<vertices.size();i++ )
+    {
+       vertices[i] = rotation( vertices[i], that, tmag );
+       if( i==0 )
+       {
+          llc = vertices[0];
+          urc = vertices[0];
+       }
+       else
+       {
+          llc[0] = ( llc[0] < vertices[i][0] ) ? llc[0] : vertices[i][0];
+          llc[1] = ( llc[1] < vertices[i][1] ) ? llc[1] : vertices[i][1];
+          llc[2] = ( llc[2] < vertices[i][2] ) ? llc[2] : vertices[i][2];
+          urc[0] = ( urc[0] > vertices[i][0] ) ? urc[0] : vertices[i][0];
+          urc[1] = ( urc[1] > vertices[i][1] ) ? urc[1] : vertices[i][1];
+          urc[2] = ( urc[2] > vertices[i][2] ) ? urc[2] : vertices[i][2];
+       }
+    }
+}
+
+
+void TriangleGeometry::merge( const TriangleGeometry& g )
+{
+    size_t nb_verts = vertices.size();
+    size_t nb_tex = textureCoordinates.size();
+    size_t nb_faces = faces.size(); 
+    for( size_t i=0;i<g.vertices.size();i++ )
+    {
+       addVertex( g.vertices[i] );
+    }
+    for( size_t i=0;i<g.textureCoordinates.size();i++ )
+    {
+       addTextureCoordinate( g.textureCoordinates[i] );
+    }
+    for( size_t i=0;i<g.nbFaces();i++ )
+    {
+       int f1,f2,f3;
+       g.getFace(i,f1,f2,f3);
+       f1 += nb_verts;
+       f2 += nb_verts;
+       f3 += nb_verts;
+       addFace(f1,f2,f3);
+    }
+}
+
+
+
+const Vector TriangleGeometry::faceNormal( const size_t i ) const
+{
+   int it,jt,kt;
+   getFace( i, it, jt, kt );
+   Vector e1 = getVertex(jt) - getVertex(it);
+   Vector e2 = getVertex(kt) - getVertex(it);
+   e1 = e1^e2;
+   e1.normalize();
+   return e1;
+}
+
+const double TriangleGeometry::faceArea( const size_t i ) const
+{
+   int it,jt,kt;
+   getFace( i, it, jt, kt );
+   Vector e1 = getVertex(jt) - getVertex(it);
+   Vector e2 = getVertex(kt) - getVertex(it);
+   e1 = e1^e2;
+   return 0.5*e1.magnitude();
+}
+
+
+void lux::writeObj( const string& fname, const TriangleGeometry& g )
+{
+   ofstream file( fname.c_str() );
+   if( !file ){ return; }
+   file << "# OBJ file generated by bishop\n";
+   file << "# vertices: " << g.nbVertices() << "\n";
+   file << "# texture coordinates: " << g.nbTextureCoordinates() << "\n";
+   file << "# faces: " << g.nbFaces() << "\n";
+
+   for( size_t i=0;i<g.nbVertices();i++ )
+   {
+      const Vector& v = g.getVertex(i);
+      file << "v " << v.X() << " " << v.Y() << " " << v.Z() << endl;
+   }
+
+   for( size_t i=0;i<g.nbTextureCoordinates();i++ )
+   {
+      const Vector& v = g.getTextureCoordinate(i);
+      file << "vt " << v.X() << " " << v.Y() << " " << v.Z() << endl;
+   }
+
+   int i,j,k;
+   for( size_t f=0;f<g.nbFaces();f++ )
+   {
+      g.getFace(f,i,j,k);
+      file << "f " << i+1 << " " << j+1 << " " << k+1 << endl;
+   }
+
+
+  file.close();
+}
+
+
+
+Volume<float> * lux::ProcessLevelSet( const TriangleGeometry& geom )
+{
+   int f0, f1, f2;
+   Volume<float> * v = 0;
+   
+   for( size_t i=0;i<geom.nbFaces();i++ )
+   {
+      geom.getFace( i, f0, f1, f2 );
+      Volume<float> * tls = new TriangleLevelSet( geom.getVertex(f0), geom.getVertex(f1), geom.getVertex(f2), 2.0  );
+      if( i== 0)
+      {
+         v = tls;
+      }
+      else
+      {
+         v = new IntersectionVolume( v, tls );
+      }
+   }
+   
+   return v;
+}
+
+
+
+
+Volume<float> * lux::ProcessLevelSet( const TriangleGeometry& geom, VolumeGrid<float>& lsgrid, const bool flip )
+{
+   //int f0, f1, f2;
+
+   SignedDistance sd( geom );
+   Sample<float>( &lsgrid, &sd );
+
+   return new GriddedVolume(&lsgrid);
+}
+
+
+
+
+//  6 sides, 2 triangles per size = 12 triangles
+Volume<float> * lux::ProcessAABox( const Vector& llc, const Vector& urc )
+{
+   // set up vertices
+   TriangleGeometry geom;
+
+   Vector vert = llc;
+   geom.addVertex( vert );
+
+   vert += Vector(urc[0]-llc[0], 0, 0);
+   geom.addVertex( vert );
+
+   vert += Vector( 0, 0, urc[2]-llc[2]);
+   geom.addVertex( vert );
+
+   vert = llc + Vector( 0, 0, urc[2]-llc[2]);
+   geom.addVertex( vert );
+
+   vert = llc + Vector( 0, urc[1]-llc[1], 0 );
+   geom.addVertex( vert );
+
+   vert += Vector(urc[0]-llc[0], 0, 0);
+   geom.addVertex( vert );
+
+   vert += Vector( 0, 0, urc[2]-llc[2]);
+   geom.addVertex( vert );
+
+   vert = llc + Vector( 0, urc[1]-llc[1], urc[2]-llc[2]);
+   geom.addVertex( vert );
+
+
+   // Build triangle triplets
+
+   TriangleGeometry::Face face;
+   face.resize(3);
+   face[0] = 0;
+   face[1] = 1;
+   face[2] = 5;
+   geom.addFace( face );
+
+   face[0] = 0;
+   face[1] = 5;
+   face[2] = 4;
+   geom.addFace(face);
+
+   face[0] = 1;
+   face[1] = 2;
+   face[2] = 6;
+   geom.addFace(face);
+
+   face[0] = 1;
+   face[1] = 6;
+   face[2] = 5;
+   geom.addFace(face);
+
+   face[0] = 2;
+   face[1] = 3;
+   face[2] = 7;
+   geom.addFace(face);
+
+   face[0] = 2;
+   face[1] = 7;
+   face[2] = 6;
+   geom.addFace(face);
+
+   face[0] = 3;
+   face[1] = 0;
+   face[2] = 4;
+   geom.addFace(face);
+
+   face[0] = 3;
+   face[1] = 4;
+   face[2] = 7;
+   geom.addFace(face);
+
+   face[0] = 0;
+   face[1] = 2;
+   face[2] = 1;
+   geom.addFace(face);
+
+   face[0] = 0;
+   face[1] = 3;
+   face[2] = 2;
+   geom.addFace(face);
+
+   face[0] = 4;
+   face[1] = 5;
+   face[2] = 6;
+   geom.addFace(face);
+
+   face[0] = 4;
+   face[1] = 6;
+   face[2] = 7;
+   geom.addFace(face);
+
+
+   return ProcessLevelSet( geom );
+}
+
+
+
+
+
+//  6 sides, 2 triangles per size = 12 triangles
+Volume<float> * lux::ProcessAABox( const Vector& llc, const Vector& urc, VolumeGrid<float>& lsgrid  )
+{
+   // set up vertices
+   TriangleGeometry geom;
+
+   Vector vert = llc;
+   geom.addVertex( vert );
+
+   vert += Vector(urc[0]-llc[0], 0, 0);
+   geom.addVertex( vert );
+
+   vert += Vector( 0, 0, urc[2]-llc[2]);
+   geom.addVertex( vert );
+
+   vert = llc + Vector( 0, 0, urc[2]-llc[2]);
+   geom.addVertex( vert );
+
+   vert = llc + Vector( 0, urc[1]-llc[1], 0 );
+   geom.addVertex( vert );
+
+   vert += Vector(urc[0]-llc[0], 0, 0);
+   geom.addVertex( vert );
+
+   vert += Vector( 0, 0, urc[2]-llc[2]);
+   geom.addVertex( vert );
+
+   vert = llc + Vector( 0, urc[1]-llc[1], urc[2]-llc[2]);
+   geom.addVertex( vert );
+
+
+   // Build triangle triplets
+
+   TriangleGeometry::Face face;
+   face.push_back(0);
+   face.push_back(1);
+   face.push_back(5);
+   geom.addFace( face );
+
+   face[1] = 5;
+   face[2] = 4;
+   geom.addFace(face);
+
+   face[0] = 1;
+   face[1] = 2;
+   face[2] = 6;
+   geom.addFace(face);
+
+   face[0] = 1;
+   face[1] = 6;
+   face[2] = 5;
+   geom.addFace(face);
+
+   face[0] = 2;
+   face[1] = 3;
+   face[2] = 7;
+   geom.addFace(face);
+
+   face[0] = 2;
+   face[1] = 7;
+   face[2] = 6;
+   geom.addFace(face);
+
+   face[0] = 3;
+   face[1] = 0;
+   face[2] = 4;
+   geom.addFace(face);
+
+   face[0] = 3;
+   face[1] = 4;
+   face[2] = 7;
+   geom.addFace(face);
+
+   face[0] = 0;
+   face[1] = 2;
+   face[2] = 1;
+   geom.addFace(face);
+
+   face[0] = 0;
+   face[1] = 3;
+   face[2] = 2;
+   geom.addFace(face);
+
+   face[0] = 4;
+   face[1] = 5;
+   face[2] = 6;
+   geom.addFace(face);
+
+   face[0] = 4;
+   face[1] = 6;
+   face[2] = 7;
+   geom.addFace(face);
+
+
+   return ProcessLevelSet( geom, lsgrid );
+}
+
+
+
+Volume<float> * lux::ProcessPyramid( const float length, const Vector center )
+{
+   // set up vertices
+   TriangleGeometry geom;
+
+   Vector base(-length*0.5, -length*0.5, -length*0.5);
+   base -= center;
+   Vector vert(0,0,0);
+   geom.addVertex( vert+base );
+
+   vert = Vector(length, 0, 0);
+   geom.addVertex( vert+base );
+
+   vert = Vector( 0, 0, length);
+   geom.addVertex( vert+base );
+
+   vert = Vector( 0, length, 0);
+   geom.addVertex( vert+base );
+
+   // Build triangle triplets
+
+   TriangleGeometry::Face face;
+   face.resize(3);
+   face[0] = 0;
+   face[1] = 1;
+   face[2] = 2;
+   geom.addFace( face );
+
+   face[0] = 0;
+   face[1] = 3;
+   face[2] = 1;
+   geom.addFace(face);
+
+   face[0] = 0;
+   face[1] = 2;
+   face[2] = 3;
+   geom.addFace(face);
+
+   face[0] = 1;
+   face[1] = 3;
+   face[2] = 2;
+   geom.addFace(face);
+
+   return ProcessLevelSet( geom );
+}
+
+
+
+
+
+Volume<float> * lux::ProcessPyramid( const float length, const Vector center, VolumeGrid<float>& lsgrid  )
+{
+   // set up vertices
+   TriangleGeometry geom;
+
+   Vector base(-length*0.5, -length*0.5, -length*0.5);
+   base -= center;
+   Vector vert(0,0,0);
+   geom.addVertex( vert+base );
+
+   vert = Vector(length, 0, 0);
+   geom.addVertex( vert+base );
+
+   vert = Vector( 0, 0, length);
+   geom.addVertex( vert+base );
+
+   vert = Vector( 0, length, 0);
+   geom.addVertex( vert+base );
+
+   // Build triangle triplets
+
+   TriangleGeometry::Face face;
+   face.resize(3);
+   face[0] = 0;
+   face[1] = 2;
+   face[2] = 1;
+   geom.addFace( face );
+
+   face[0] = 0;
+   face[1] = 1;
+   face[2] = 3;
+   geom.addFace(face);
+
+   face[0] = 0;
+   face[1] = 3;
+   face[2] = 2;
+   geom.addFace(face);
+
+   face[0] = 1;
+   face[1] = 2;
+   face[2] = 3;
+   geom.addFace(face);
+
+   return ProcessLevelSet( geom, lsgrid );
+}
+
+
+SignedDistance::SignedDistance( const TriangleGeometry& geom ) 
+{
+   int f0,f1,f2;
+   for( size_t i=0;i<geom.nbFaces();i++ )
+   {
+      geom.getFace( i, f0, f1, f2 );
+      Triangle tls( geom.getVertex( f0 ), geom.getVertex( f1 ), geom.getVertex( f2 ) );
+      if( tls.isGood() ) 
+      { 
+         geometry.push_back( tls );
+      } 
+      else { cout << "face " << i << " rejected\n"; }
+   }
+}
+
+
+
+
+SignedDistance::SignedDistance( const Triangle& geom ) 
+{
+   geometry.push_back( geom );
+}
+
+const float SignedDistance::eval( const Vector& P ) const
+{
+   float result = 0;
+   Vector bc, P0;
+   bool foundATriangle = false;
+   for( size_t i=0;i<geometry.size();i++ )
+   {
+      const Triangle& T = geometry[i];
+      double cd = ClosestDistance( T, P );
+      if( !foundATriangle )
+      {
+         result = cd;
+	 foundATriangle = true;
+      }
+      else
+      {
+         if( fabs(cd) < fabs(result) ){ result = cd; }
+      }
+   }
+
+   // Now determine whether the point is inside or out
+   Vector D(1,0,0);
+   vector<float> intersections = FindAllIntersections( geometry, P, D, 1.0e6, 1.0e-6 );
+   int nbintersections = intersections.size() % 2;
+   if( nbintersections == 0 ){ result = -fabs(result); } 
+
+   return result;
+}
+
+
+
+
+
+
+
+TexturedSignedDistance::TexturedSignedDistance( const TriangleGeometry& geom ) 
+{
+   int f0,f1,f2,tf0,tf1,tf2;
+   for( size_t i=0;i<geom.nbFaces();i++ )
+   {
+      geom.getTexturedFace( i, f0, f1, f2, tf0, tf1, tf2 );
+      TexturedTriangle tls( geom.getVertex( f0 ), geom.getVertex( f1 ), geom.getVertex( f2 ),
+                            geom.getTextureCoordinate( tf0 ), 
+			    geom.getTextureCoordinate( tf1 ),
+			    geom.getTextureCoordinate( tf2 )  
+			  );
+      if( tls.isGood() ) 
+      { 
+         geometry.push_back( tls );
+      } 
+      else { cout << "face " << i << " rejected\n"; }
+   }
+}
+
+
+
+
+TexturedSignedDistance::TexturedSignedDistance( const TexturedTriangle& geom ) 
+{
+   geometry.push_back( geom );
+}
+
+const Vector TexturedSignedDistance::eval( const Vector& P ) const
+{
+   Vector result;
+   Vector bc, P0;
+   bool foundATriangle = false;
+   for( size_t i=0;i<geometry.size();i++ )
+   {
+      const TexturedTriangle& T = geometry[i];
+      Vector cd = ClosestDistance( T, P );
+      if( !foundATriangle )
+      {
+         result = cd;
+	 foundATriangle = true;
+      }
+      else
+      {
+         if( fabs(cd[2]) < fabs(result[2]) ){ result = cd; }
+      }
+   }
+
+   // Now determine whether the point is inside or out
+   Vector D(1,0,0);
+   vector<Vector> intersections = FindAllIntersections( geometry, P, D, 1.0e6, 1.0e-6 );
+   int nbintersections = intersections.size() % 2;
+   if( nbintersections == 0 ){ result[2] = -fabs(result[2]); } 
+
+   return result;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+vector<float> lux::FindAllIntersections( const vector<Triangle>& g, const Vector P, const Vector D, const float dmax, float threshold )
+{
+   vector<float> hits;
+   for( size_t i=0;i<g.size();i++ )
+   {
+      Vector DU = D^g[i].Eu();
+      Vector DV = D^g[i].Ev();
+      double uu = DU*DU;
+      double vv = DV*DV;
+      double uv = DU*DV;
+      double denom = uu*vv - uv*uv;
+      if( fabs(denom) > 0.0 )
+      {
+          Vector DX = D^(P - g[i].P());
+	  float a = DX*( DU * vv - DV * uv )/denom;
+	  float b = DX*( DV * uu - DU * uv )/denom;
+
+	  if( a >= 0 && a <= 1 && b >= 0 && b <= 1 && (a+b)<= 1 )
+	  {
+	     float t = D*( a*g[i].Eu() + b*g[i].Ev() + g[i].P() - P ) / (D*D);
+	     if( t >= 0 )
+	     {
+	        if( t < dmax ){ hits.push_back(t); }
+		if( t > dmax )
+		{
+		   cout << "intersection too distant " << t << endl;
+                   cout << a << " " << b << "    " << denom << "   " << i << endl;
+		   cout << "\t" << g[i].P()[0] << " " << g[i].P()[1] << " " << g[i].P()[2] << endl;
+		   cout << "\t" << g[i].Eu()[0] << " " << g[i].Eu()[1] << " " << g[i].Eu()[2] << endl;
+		   cout << "\t" << g[i].Ev()[0] << " " << g[i].Ev()[1] << " " << g[i].Ev()[2] << endl;
+		}
+	     }
+	  }
+       }
+   }
+   sort( hits.begin(), hits.end() );
+
+   vector<float> filtered;
+   if( !hits.empty() )
+   {
+      filtered.push_back(hits[0]);
+      for( size_t i=1;i<hits.size();i++ )
+      {
+         if( hits[i]-filtered[filtered.size()-1] >= threshold )
+	 {
+	    filtered.push_back(hits[i]);
+	 }
+      }
+   }
+
+   return filtered;
+}
+
+
+
+vector<Vector> lux::FindAllIntersections( const vector<TexturedTriangle>& g, const Vector P, const Vector D, const float dmax, const float threshold )
+{
+   vector<Vector> hitstv;
+   vector<float> hits;
+   for( size_t i=0;i<g.size();i++ )
+   {
+      Vector DU = D^g[i].Eu();
+      Vector DV = D^g[i].Ev();
+      double uu = DU*DU;
+      double vv = DV*DV;
+      double uv = DU*DV;
+      double denom = uu*vv - uv*uv;
+      if( fabs(denom) > 0.0 )
+      {
+          Vector DX = D^(P - g[i].P());
+	  float a = DX*( DU * vv - DV * uv )/denom;
+	  float b = DX*( DV * uu - DU * uv )/denom;
+
+	  if( a >= 0 && a <= 1 && b >= 0 && b <= 1 && (a+b)<= 1 )
+	  {
+	     float t = D*( a*g[i].Eu() + b*g[i].Ev() + g[i].P() - P ) / (D*D);
+	     if( t >= 0 )
+	     {
+	        if( t < dmax )
+		{
+		   Vector vt = a*g[i].Tu() + b*g[i].Tv() + g[i].T();
+		   Vector h( vt[0], vt[1], t );
+		   hits.push_back(t);
+		   hitstv.push_back(vt);
+		}
+		if( t > dmax )
+		{
+		   cout << "intersection too distant " << t << endl;
+                   cout << a << " " << b << "    " << denom << "   " << i << endl;
+		   cout << "\t" << g[i].P()[0] << " " << g[i].P()[1] << " " << g[i].P()[2] << endl;
+		   cout << "\t" << g[i].Eu()[0] << " " << g[i].Eu()[1] << " " << g[i].Eu()[2] << endl;
+		   cout << "\t" << g[i].Ev()[0] << " " << g[i].Ev()[1] << " " << g[i].Ev()[2] << endl;
+		}
+	     }
+	  }
+       }
+   }
+   sort( hits.begin(), hits.end() );
+
+   vector<Vector> filtered;
+   float last = 0;
+   for( size_t i=0;i<hits.size();i++ )
+   {
+      for( size_t j=0;j<hitstv.size();j++ )
+      {
+         if( hits[i] == hitstv[j][2] )
+	 {
+	    if( i==0 )
+	    { 
+	       filtered.push_back( hitstv[j] );
+	       last = hitstv[j][2];
+	    }
+	    else
+	    {
+	       if( hits[i]-last >= threshold )
+	       {
+	          filtered.push_back(hitstv[j]);
+		  last = hitstv[j][2];
+	       }
+	    }
+	    break;
+	 }
+      }
+   }
+
+   /*
+   if( !hits.empty() )
+   {
+
+      // sort the vectors now
+
+      filtered.push_back(hits[0]);
+      for( size_t i=1;i<hits.size();i++ )
+      {
+         if( hits[i]-filtered[filtered.size()-1] >= threshold )
+	 {
+	    filtered.push_back(hits[i]);
+	 }
+      }
+   }
+   */
+
+   return filtered;
+}
+
+
+void lux::RayMarchLevelSet( const TriangleGeometry& geom, ScalarGrid& lsgrid )
+{
+   int nz = lsgrid->nz();
+   int ny = lsgrid->ny();
+   int nx = lsgrid->nx();
+   float dx = lsgrid->dx();
+   float Lx = lsgrid->Lx();
+   float dy = lsgrid->dy();
+   float Ly = lsgrid->Ly();
+   float dz = lsgrid->dz();
+   float Lz = lsgrid->Lz();
+
+   float sdfthreshold = 5.0*sqrt(dx*dx + dy*dy + dz*dz);
+   float threshold = 0.1;
+
+   vector<Triangle> geometry;
+   int f0,f1,f2;
+   for( size_t i=0;i<geom.nbFaces();i++ )
+   {
+      geom.getFace( i, f0, f1, f2 );
+      Triangle tls( geom.getVertex( f0 ), geom.getVertex( f1 ), geom.getVertex( f2 ) );
+      if( tls.isGood() ) 
+      { 
+         geometry.push_back( tls );
+      } 
+      else { cout << "face " << i << " with vertices " << f0 << " " << f1 << " " << f2 << " rejected\n"; }
+   }
+
+
+
+
+   // Find intersections and label gridpoint inside or outside
+   ProgressMeter meterx( nz*ny , "Level Set X Scan");
+   for( int k=0;k<nz;k++ )
+   {
+      for( int j=0;j<ny;j++ )
+      {
+         Vector P = lsgrid->evalP(0,j,k);
+	 Vector D = lsgrid->evalP(1,j,k) - P;
+	 D.normalize();
+         vector<float> intersections = FindAllIntersections( geometry, P, D, Lx, dx*threshold );
+	 if( !intersections.empty() )
+	 {
+            float status = 1; // -1 = outside, 0 = on surface, 1 = inside
+	    int i = 0;
+            for( size_t current=0;current<intersections.size();current++ )
+	    {
+	       status *= -1;
+	       float cells = intersections[current]/dx;
+               while( i <= (int)cells )
+	       {
+	          float d = intersections[current] - i*dx;
+		  if( current > 0 )
+		  {
+		     float d0 = i*dx - intersections[current-1];
+		     d = ( d < d0 ) ? d : d0;
+		  }
+                  lsgrid->set(i,j,k, status * d );
+		  ++i;
+	       }
+	    }
+	    while( i < nx )
+	    {
+	       float d = intersections[intersections.size()-1] - i*dx;
+	       lsgrid->set(i,j,k, d);
+	       ++i;
+	    }
+	 }
+	 meterx.update();
+      }
+   }
+
+
+   // Find intersections and label gridpoint inside or outside
+   ProgressMeter metery( nz*nx , "Level Set Y Scan");
+   for( int k=0;k<nz;k++ )
+   {
+      for( int i=0;i<nx;i++ )
+      {
+         Vector P = lsgrid->evalP(i,0,k);
+	 Vector D = lsgrid->evalP(i,1,k) - P;
+	 D.normalize();
+         vector<float> intersections = FindAllIntersections( geometry, P, D, Ly, dy*threshold );
+	 if( !intersections.empty() )
+	 {
+            float status = 1; // -1 = outside, 0 = on surface, 1 = inside
+	    int j = 0;
+            for( size_t current=0;current<intersections.size();current++ )
+	    {
+	       status *= -1;
+	       float cells = intersections[current]/dy;
+               while( j <= (int)cells )
+	       {
+	          float d = intersections[current] - j*dy;
+		  if( current > 0 )
+		  {
+		     float d0 = j*dy - intersections[current-1];
+		     d = ( d < d0 ) ? d : d0;
+		  }
+	          float val = lsgrid->get(i,j,k);
+	          val = ( fabs(val) < d ) ? val : status*d;
+	          lsgrid->set(i,j,k, val ); 
+		  ++j;
+	       }
+	    }
+	    while( j < ny )
+	    {
+	       float d = intersections[intersections.size()-1] - j*dy;
+	       float val = lsgrid->get(i,j,k);
+	       val = ( fabs(val) < fabs(d) ) ? val : d;
+	       lsgrid->set(i,j,k, val ); 
+	       ++j;
+	    }
+
+	 }
+	 metery.update();
+      }
+   }
+
+   // Find intersections and label gridpoint inside or outside
+   ProgressMeter meterz( ny*nx , "Level Set Z Scan");
+   for( int j=0;j<ny;j++ )
+   {
+      for( int i=0;i<nx;i++ )
+      {
+         Vector P = lsgrid->evalP(i,j,0);
+	 Vector D = lsgrid->evalP(i,j,1) - P;
+	 D.normalize();
+         vector<float> intersections = FindAllIntersections( geometry, P, D, Lz, dz*threshold );
+	 if( !intersections.empty() )
+	 {
+            float status = 1; // -1 = outside, 0 = on surface, 1 = inside
+	    int k = 0;
+            for( size_t current=0;current<intersections.size();current++ )
+	    {
+	       status *= -1;
+	       float cells = intersections[current]/dz;
+               while( k <= (int)cells )
+	       {
+	          float d = intersections[current] - k*dz;
+		  if( current > 0 )
+		  {
+		     float d0 = k*dz - intersections[current-1];
+		     d = ( d < d0 ) ? d : d0;
+		  }
+	          float val = lsgrid->get(i,j,k);
+	          val = ( fabs(val) < d ) ? val : status*d;
+	          lsgrid->set(i,j,k, val ); 
+		  ++k;
+	       }
+	    }
+	    while( k < nz )
+	    {
+	       float d = intersections[intersections.size()-1] - k*dz;
+	       float val = lsgrid->get(i,j,k);
+	       val = ( fabs(val) < fabs(d) ) ? val : d;
+	       lsgrid->set(i,j,k, val ); 
+	       ++k;
+	    }
+
+	 }
+	 meterz.update();
+      }
+   }
+
+
+
+	SignedDistance sdf( geom );
+   	ProgressMeter meter( nx*ny*nz , "Levelset Detailed Scan");
+
+	for( int k=0;k<nz;k++ )
+	{
+	   for( int j=0;j<ny;j++ )
+   	   {
+  	      for( int i=0;i<nx;i++ )
+	      {
+	         if( fabs(lsgrid->get(i,j,k)) < sdfthreshold )
+		 {
+	            Vector P = lsgrid->evalP(i,j,k);
+		    lsgrid->set(i,j,k, sdf.eval(P) );
+		 }
+		 meter.update();
+	      }
+	   }
+	}
+}
+
+
+
+
+
+
+
+
+
+void lux::RayMarchLevelSet( const TriangleGeometry& geom, VectorGrid& lsgrid )
+{
+   int nz = lsgrid->nz();
+   int ny = lsgrid->ny();
+   int nx = lsgrid->nx();
+   float dx = lsgrid->dx();
+   float Lx = lsgrid->Lx();
+   float dy = lsgrid->dy();
+   float Ly = lsgrid->Ly();
+   float dz = lsgrid->dz();
+   float Lz = lsgrid->Lz();
+
+   float sdfthreshold = 5.0*sqrt(dx*dx + dy*dy + dz*dz);
+   float threshold = 0.1;
+
+   vector<TexturedTriangle> geometry;
+   int f0,f1,f2,t0,t1,t2;
+   for( size_t i=0;i<geom.nbFaces();i++ )
+   {
+      geom.getTexturedFace( i, f0, f1, f2, t0, t1, t2 );
+      TexturedTriangle tls( geom.getVertex( f0 ), geom.getVertex( f1 ), geom.getVertex( f2 ), 
+                            geom.getTextureCoordinate( t0 ), geom.getTextureCoordinate( t1 ), geom.getTextureCoordinate( t2 ) );
+      if( tls.isGood() ) 
+      { 
+         geometry.push_back( tls );
+      } 
+      else { cout << "face " << i << " with vertices " << f0 << " " << f1 << " " << f2 << " rejected\n"; }
+   }
+
+
+
+
+   // Find intersections and label gridpoint inside or outside
+   ProgressMeter meterx( nz*ny , "Level Set X Scan");
+   for( int k=0;k<nz;k++ )
+   {
+      for( int j=0;j<ny;j++ )
+      {
+         Vector P = lsgrid->evalP(0,j,k);
+	 Vector D = lsgrid->evalP(1,j,k) - P;
+	 D.normalize();
+         vector<Vector> intersections = FindAllIntersections( geometry, P, D, Lx, dx*threshold );
+	 if( !intersections.empty() )
+	 {
+            float status = 1; // -1 = outside, 0 = on surface, 1 = inside
+	    int i = 0;
+            for( size_t current=0;current<intersections.size();current++ )
+	    {
+	       status *= -1;
+	       float cells = intersections[current][2]/dx;
+               while( i <= (int)cells )
+	       {
+	          float d = intersections[current][2] - i*dx;
+		  if( current > 0 )
+		  {
+		     float d0 = i*dx - intersections[current-1][2];
+		     d = ( d < d0 ) ? d : d0;
+		  }
+		  Vector value = intersections[current];
+		  value[2] = status*d;
+                  lsgrid->set(i,j,k, value );
+		  ++i;
+	       }
+	    }
+	    while( i < nx )
+	    {
+	       float d = intersections[intersections.size()-1][2] - i*dx;
+	       Vector value = intersections[intersections.size()-1];
+	       value[2] = d;
+	       lsgrid->set(i,j,k, value);
+	       ++i;
+	    }
+	 }
+	 meterx.update();
+      }
+   }
+
+
+   // Find intersections and label gridpoint inside or outside
+   ProgressMeter metery( nz*nx , "Level Set Y Scan");
+   for( int k=0;k<nz;k++ )
+   {
+      for( int i=0;i<nx;i++ )
+      {
+         Vector P = lsgrid->evalP(i,0,k);
+	 Vector D = lsgrid->evalP(i,1,k) - P;
+	 D.normalize();
+         vector<Vector> intersections = FindAllIntersections( geometry, P, D, Ly, dy*threshold );
+	 if( !intersections.empty() )
+	 {
+            float status = 1; // -1 = outside, 0 = on surface, 1 = inside
+	    int j = 0;
+            for( size_t current=0;current<intersections.size();current++ )
+	    {
+	       status *= -1;
+	       float cells = intersections[current][2]/dy;
+               while( j <= (int)cells )
+	       {
+	          float d = intersections[current][2] - j*dy;
+		  if( current > 0 )
+		  {
+		     float d0 = j*dy - intersections[current-1][2];
+		     d = ( d < d0 ) ? d : d0;
+		  }
+	          Vector val = lsgrid->get(i,j,k);
+	          if( fabs(val[2]) >= d )
+		  {
+		     val = intersections[current];
+		     val[2] = status*d;
+                     lsgrid->set(i,j,k, val );
+		  }
+		  ++j;
+	       }
+	    }
+	    while( j < ny )
+	    {
+	       float d = intersections[intersections.size()-1][2] - j*dy;
+	       Vector val = lsgrid->get(i,j,k);
+	       if( fabs(val[2]) >= d )
+	       {
+	          val = intersections[intersections.size()-1];
+	          val[2] = status*d;
+                  lsgrid->set(i,j,k, val );
+	       }
+	       ++j;
+	    }
+
+	 }
+	 metery.update();
+      }
+   }
+
+   // Find intersections and label gridpoint inside or outside
+   ProgressMeter meterz( ny*nx , "Level Set Z Scan");
+   for( int j=0;j<ny;j++ )
+   {
+      for( int i=0;i<nx;i++ )
+      {
+         Vector P = lsgrid->evalP(i,j,0);
+	 Vector D = lsgrid->evalP(i,j,1) - P;
+	 D.normalize();
+         vector<Vector> intersections = FindAllIntersections( geometry, P, D, Lz, dz*threshold );
+	 if( !intersections.empty() )
+	 {
+            float status = 1; // -1 = outside, 0 = on surface, 1 = inside
+	    int k = 0;
+            for( size_t current=0;current<intersections.size();current++ )
+	    {
+	       status *= -1;
+	       float cells = intersections[current][2]/dz;
+               while( k <= (int)cells )
+	       {
+	          float d = intersections[current][2] - k*dz;
+		  if( current > 0 )
+		  {
+		     float d0 = k*dz - intersections[current-1][2];
+		     d = ( d < d0 ) ? d : d0;
+		  }
+	          Vector val = lsgrid->get(i,j,k);
+	          if( fabs(val[2]) >= d ) 
+		  {
+	             val = intersections[current];
+		     val[2] = status*d;
+                     lsgrid->set(i,j,k, val );
+		  }
+		  ++k;
+	       }
+	    }
+	    while( k < nz )
+	    {
+	       float d = intersections[intersections.size()-1][2] - k*dz;
+	       Vector val = lsgrid->get(i,j,k);
+	       if( fabs(val[2]) < fabs(d) ) 
+	       {
+	          val = intersections[intersections.size()-1];
+	          val[2] = d;
+                  lsgrid->set(i,j,k, val );
+	       }
+	       ++k;
+	    }
+	 }
+	 meterz.update();
+      }
+   }
+
+
+
+	TexturedSignedDistance sdf( geom );
+   	ProgressMeter meter( nx*ny*nz , "Levelset Detailed Scan");
+
+	for( int k=0;k<nz;k++ )
+	{
+	   for( int j=0;j<ny;j++ )
+   	   {
+  	      for( int i=0;i<nx;i++ )
+	      {
+	         Vector val = lsgrid->get(i,j,k);
+	         if( fabs(val[2]) < sdfthreshold )
+		 {
+	            Vector P = lsgrid->evalP(i,j,k);
+		    lsgrid->set(i,j,k, sdf.eval(P) );
+		 }
+		 meter.update();
+	      }
+	   }
+	}
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+void lux::RayMarchLevelSet( const TriangleGeometry& geom, VolumeGrid<float>& lsgrid, const float threshold, int samps )
+{
+   int nz = lsgrid.nz();
+   int ny = lsgrid.ny();
+   int nx = lsgrid.nx();
+   float dx = lsgrid.dx();
+   float Lx = lsgrid.Lx();
+   float dy = lsgrid.dy();
+   float Ly = lsgrid.Ly();
+   float dz = lsgrid.dz();
+   float Lz = lsgrid.Lz();
+
+   float maxdistance =10.0* sqrt( Lx*Lx + Ly*Ly + Lz*Lz );
+   float sdfthreshold = 5.0*sqrt(dx*dx + dy*dy + dz*dz);
+
+   vector<Triangle> geometry;
+   int f0,f1,f2;
+   for( size_t i=0;i<geom.nbFaces();i++ )
+   {
+      geom.getFace( i, f0, f1, f2 );
+      Triangle tls( geom.getVertex( f0 ), geom.getVertex( f1 ), geom.getVertex( f2 ) );
+      if( tls.isGood() ) 
+      { 
+         geometry.push_back( tls );
+      } 
+      else { cout << "face " << i << " rejected\n"; }
+   }
+
+
+
+
+   // Find intersections and label gridpoint inside or outside
+   ProgressMeter meterx( nz*ny , "Level Set X Scan");
+   for( int k=0;k<nz;k++ )
+   {
+      for( int j=0;j<ny;j++ )
+      {
+         Vector P = lsgrid.evalP(0,j,k);
+	 Vector D = lsgrid.evalP(1,j,k) - P;
+	 D.normalize();
+         vector<float> intersections = FindAllIntersections( geometry, P, D, Lx, dx*threshold );
+	 if( intersections.empty() )
+	 {
+	    for( int i=0;i<nx;i++ )
+	    { 
+	       lsgrid.value(i,j,k) = -maxdistance; 
+	    }
+	 }
+	 else
+	 {
+            float status = 1; // -1 = outside, 0 = on surface, 1 = inside
+	    int i = 0;
+            for( size_t current=0;current<intersections.size();current++ )
+	    {
+	       status *= -1;
+	       float cells = intersections[current]/dx;
+               while( i <= (int)cells )
+	       {
+	          float d = intersections[current] - i*dx;
+		  if( current > 0 )
+		  {
+		     float d0 = i*dx - intersections[current-1];
+		     d = ( d < d0 ) ? d : d0;
+		  }
+                  lsgrid.value(i,j,k) = status * d;
+		  ++i;
+	       }
+	    }
+	    while( i < nx )
+	    {
+	       float d = intersections[intersections.size()-1] - i*dx;
+	       lsgrid.value(i,j,k) = d;
+	       ++i;
+	    }
+	 }
+	 meterx.update();
+      }
+   }
+
+
+   // Find intersections and label gridpoint inside or outside
+   ProgressMeter metery( nz*nx , "Level Set Y Scan");
+   for( int k=0;k<nz;k++ )
+   {
+      for( int i=0;i<nx;i++ )
+      {
+         Vector P = lsgrid.evalP(i,0,k);
+	 Vector D = lsgrid.evalP(i,1,k) - P;
+	 D.normalize();
+         vector<float> intersections = FindAllIntersections( geometry, P, D, Ly, dy*threshold );
+	 if( intersections.empty() )
+	 {
+	    for( int j=0;j<ny;j++ )
+	    { 
+	       float val = lsgrid.value(i,j,k);
+	       val = ( fabs(val) < maxdistance ) ? val : -maxdistance;
+	       lsgrid.value(i,j,k) = val; 
+	    }
+	 }
+	 else
+	 {
+            float status = 1; // -1 = outside, 0 = on surface, 1 = inside
+	    int j = 0;
+            for( size_t current=0;current<intersections.size();current++ )
+	    {
+	       status *= -1;
+	       float cells = intersections[current]/dy;
+               while( j <= (int)cells )
+	       {
+	          float d = intersections[current] - j*dy;
+		  if( current > 0 )
+		  {
+		     float d0 = j*dy - intersections[current-1];
+		     d = ( d < d0 ) ? d : d0;
+		  }
+	          float val = lsgrid.value(i,j,k);
+	          val = ( fabs(val) < d ) ? val : status*d;
+	          lsgrid.value(i,j,k) = val; 
+		  ++j;
+	       }
+	    }
+	    while( j < ny )
+	    {
+	       float d = intersections[intersections.size()-1] - j*dy;
+	       float val = lsgrid.value(i,j,k);
+	       val = ( fabs(val) < fabs(d) ) ? val : d;
+	       lsgrid.value(i,j,k) = val; 
+	       ++j;
+	    }
+
+	 }
+	 metery.update();
+      }
+   }
+
+   // Find intersections and label gridpoint inside or outside
+   ProgressMeter meterz( ny*nx , "Level Set Z Scan");
+   for( int j=0;j<ny;j++ )
+   {
+      for( int i=0;i<nx;i++ )
+      {
+         Vector P = lsgrid.evalP(i,j,0);
+	 Vector D = lsgrid.evalP(i,j,1) - P;
+	 D.normalize();
+         vector<float> intersections = FindAllIntersections( geometry, P, D, Lz, dz*threshold );
+	 if( intersections.empty() )
+	 {
+	    for( int k=0;k<nz;k++ )
+	    { 
+	       float val = lsgrid.value(i,j,k);
+	       val = ( fabs(val) < maxdistance ) ? val : -maxdistance;
+	       lsgrid.value(i,j,k) = val; 
+	    }
+	 }
+	 else
+	 {
+            float status = 1; // -1 = outside, 0 = on surface, 1 = inside
+	    int k = 0;
+            for( size_t current=0;current<intersections.size();current++ )
+	    {
+	       status *= -1;
+	       float cells = intersections[current]/dz;
+               while( k <= (int)cells )
+	       {
+	          float d = intersections[current] - k*dz;
+		  if( current > 0 )
+		  {
+		     float d0 = k*dz - intersections[current-1];
+		     d = ( d < d0 ) ? d : d0;
+		  }
+	          float val = lsgrid.value(i,j,k);
+	          val = ( fabs(val) < d ) ? val : status*d;
+	          lsgrid.value(i,j,k) = val; 
+		  ++k;
+	       }
+	    }
+	    while( k < nz )
+	    {
+	       float d = intersections[intersections.size()-1] - k*dz;
+	       float val = lsgrid.value(i,j,k);
+	       val = ( fabs(val) < fabs(d) ) ? val : d;
+	       lsgrid.value(i,j,k) = val; 
+	       ++k;
+	    }
+
+	 }
+	 meterz.update();
+      }
+   }
+
+
+
+
+
+/*
+
+   // Diagonal scan y-z 
+   // Find intersections and label gridpoint inside or outside
+   for( int i=0;i<nx;i++ )
+   {
+      for( int j=0;j<ny-1;j++ )
+      {
+         Vector P = lsgrid.evalP(i,j,0);
+	 Vector D = lsgrid.evalP(i,j+1,1) - P;
+	 float cellstep = D.magnitude();
+	 D.normalize();
+         vector<float> intersections = FindAllIntersections( geometry, P, D, maxdistance, cellstep*threshold );
+	 if( intersections.empty() )
+	 {
+	    for( int k=0;k<nz;k++ )
+	    { 
+	       if( j+k < ny )
+	       {
+	          float val = lsgrid.value(i,j+k,k);
+	          val = ( fabs(val) < maxdistance ) ? val : -maxdistance;
+	          lsgrid.value(i,j+k,k) = val;
+	       }
+	    }
+	 }
+	 else
+	 {
+            float status = 1; // -1 = outside, 0 = on surface, 1 = inside
+	    int k = 0;
+            for( size_t current=0;current<intersections.size();current++ )
+	    {
+	       status *= -1;
+	       float cells = intersections[current]/cellstep;
+               while( k <= (int)cells && j+k < ny && k < nz )
+	       {
+	          float d = intersections[current] - k*cellstep;
+		  if( current > 0 )
+		  {
+		     float d0 = k*cellstep - intersections[current-1];
+		     d = ( d < d0 ) ? d : d0;
+		  }
+	          float val = lsgrid.value(i,j+k,k);
+	          val = ( fabs(val) < d ) ? val : status*d;
+	          lsgrid.value(i,j+k,k) = val; 
+		  ++k;
+	       }
+	    }
+	    while( j+k < ny && k < nz )
+	    {
+	       float d = intersections[intersections.size()-1] - k*cellstep;
+	       float val = lsgrid.value(i,j+k,k);
+	       val = ( fabs(val) < fabs(d) ) ? val : d;
+	       lsgrid.value(i,j+k,k) = val; 
+	       ++k;
+	    }
+
+	 }
+         meter.update();
+      }
+
+     for( int k=0;k<nz-1;k++ )
+     {
+         Vector P = lsgrid.evalP(i,0,k);
+	 Vector D = lsgrid.evalP(i,1,k+1) - P;
+	 float cellstep = D.magnitude();
+	 D.normalize();
+         vector<float> intersections = FindAllIntersections( geometry, P, D, maxdistance, cellstep*threshold );
+	 if( !intersections.empty() ) 
+	 {
+            float status = 1; // -1 = outside, 0 = on surface, 1 = inside
+	    int j = 0;
+            for( size_t current=0;current<intersections.size();current++ )
+	    {
+	       status *= -1;
+	       float cells = intersections[current]/cellstep;
+               while( j <= (int)cells && j+k < nz && j < ny )
+	       {
+	          float d = intersections[current] - j*cellstep;
+		  if( current > 0 )
+		  {
+		     float d0 = j*cellstep - intersections[current-1];
+		     d = ( d < d0 ) ? d : d0;
+		  }
+	          float val = lsgrid.value(i,j,k+j);
+	          val = ( fabs(val) < d ) ? val : status*d;
+	          lsgrid.value(i,j,k+j) = val; 
+		  ++j;
+	       }
+	    }
+	    while( j+k < nz && j < ny )
+	    {
+	       float d = intersections[intersections.size()-1] - j*cellstep;
+	       float val = lsgrid.value(i,j,k+j);
+	       val = ( fabs(val) < fabs(d) ) ? val : d;
+	       lsgrid.value(i,j,k+j) = val; 
+	       ++j;
+	    }
+
+	 }
+	 meter.update();
+      }
+   }
+
+
+
+
+   // Diagonal scan x-z 
+   // Find intersections and label gridpoint inside or outside
+   for( int j=0;j<ny;j++ )
+   {
+      for( int i=0;i<nx-1;i++ )
+      {
+         Vector P = lsgrid.evalP(i,j,0);
+	 Vector D = lsgrid.evalP(i+1,j,1) - P;
+	 float cellstep = D.magnitude();
+	 D.normalize();
+         vector<float> intersections = FindAllIntersections( geometry, P, D, maxdistance, cellstep*threshold );
+	 if( !intersections.empty() )
+	 {
+            float status = 1; // -1 = outside, 0 = on surface, 1 = inside
+	    int k = 0;
+            for( size_t current=0;current<intersections.size();current++ )
+	    {
+	       status *= -1;
+	       float cells = intersections[current]/cellstep;
+               while( k <= (int)cells && i+k < nx && k < nz )
+	       {
+	          float d = intersections[current] - k*cellstep;
+		  if( current > 0 )
+		  {
+		     float d0 = k*cellstep - intersections[current-1];
+		     d = ( d < d0 ) ? d : d0;
+		  }
+	          float val = lsgrid.value(i+k,j,k);
+	          val = ( fabs(val) < d ) ? val : status*d;
+	          lsgrid.value(i+k,j,k) = val; 
+		  ++k;
+	       }
+	    }
+	    while( i+k < nx && k < nz )
+	    {
+	       float d = intersections[intersections.size()-1] - k*cellstep;
+	       float val = lsgrid.value(i+k,j,k);
+	       val = ( fabs(val) < fabs(d) ) ? val : d;
+	       lsgrid.value(i+k,j,k) = val; 
+	       ++k;
+	    }
+
+	 }
+         meter.update();
+      }
+
+     for( int k=0;k<nz-1;k++ )
+     {
+         Vector P = lsgrid.evalP(0,j,k);
+	 Vector D = lsgrid.evalP(1,j,k+1) - P;
+	 float cellstep = D.magnitude();
+	 D.normalize();
+         vector<float> intersections = FindAllIntersections( geometry, P, D, maxdistance, cellstep*threshold );
+	 if( !intersections.empty() ) 
+	 {
+            float status = 1; // -1 = outside, 0 = on surface, 1 = inside
+	    int i = 0;
+            for( size_t current=0;current<intersections.size();current++ )
+	    {
+	       status *= -1;
+	       float cells = intersections[current]/cellstep;
+               while( i <= (int)cells && i+k < nz && i < nx )
+	       {
+	          float d = intersections[current] - i*cellstep;
+		  if( current > 0 )
+		  {
+		     float d0 = i*cellstep - intersections[current-1];
+		     d = ( d < d0 ) ? d : d0;
+		  }
+	          float val = lsgrid.value(i,j,k+i);
+	          val = ( fabs(val) < d ) ? val : status*d;
+	          lsgrid.value(i,j,k+i) = val; 
+		  ++i;
+	       }
+	    }
+	    while( i+k < nz && i < nx )
+	    {
+	       float d = intersections[intersections.size()-1] - i*cellstep;
+	       float val = lsgrid.value(i,j,k+i);
+	       val = ( fabs(val) < fabs(d) ) ? val : d;
+	       lsgrid.value(i,j,k+i) = val; 
+	       ++i;
+	    }
+
+	 }
+	 meter.update();
+      }
+   }
+
+
+
+
+   // Diagonal scan x-y 
+   // Find intersections and label gridpoint inside or outside
+   for( int k=0;k<nz;k++ )
+   {
+      for( int i=0;i<nx-1;i++ )
+      {
+         Vector P = lsgrid.evalP(i,0,k);
+	 Vector D = lsgrid.evalP(i+1,1,k) - P;
+	 float cellstep = D.magnitude();
+	 D.normalize();
+         vector<float> intersections = FindAllIntersections( geometry, P, D, maxdistance, cellstep*threshold );
+	 if( !intersections.empty() )
+	 {
+            float status = 1; // -1 = outside, 0 = on surface, 1 = inside
+	    int j = 0;
+            for( size_t current=0;current<intersections.size();current++ )
+	    {
+	       status *= -1;
+	       float cells = intersections[current]/cellstep;
+               while( j <= (int)cells && j+i < nx && j < ny )
+	       {
+	          float d = intersections[current] - j*cellstep;
+		  if( current > 0 )
+		  {
+		     float d0 = j*cellstep - intersections[current-1];
+		     d = ( d < d0 ) ? d : d0;
+		  }
+	          float val = lsgrid.value(i+j,j,k);
+	          val = ( fabs(val) < d ) ? val : status*d;
+	          lsgrid.value(i+j,j,k) = val; 
+		  ++j;
+	       }
+	    }
+	    while( i+j < nx && j < ny )
+	    {
+	       float d = intersections[intersections.size()-1] - j*cellstep;
+	       float val = lsgrid.value(i+j,j,k);
+	       val = ( fabs(val) < fabs(d) ) ? val : d;
+	       lsgrid.value(i+j,j,k) = val; 
+	       ++j;
+	    }
+
+	 }
+         meter.update();
+      }
+
+
+     for( int j=0;j<ny-1;j++ )
+     {
+         Vector P = lsgrid.evalP(0,j,k);
+	 Vector D = lsgrid.evalP(1,j+1,k) - P;
+	 float cellstep = D.magnitude();
+	 D.normalize();
+         vector<float> intersections = FindAllIntersections( geometry, P, D, maxdistance, cellstep*threshold );
+	 if( !intersections.empty() ) 
+	 {
+            float status = 1; // -1 = outside, 0 = on surface, 1 = inside
+	    int i = 0;
+            for( size_t current=0;current<intersections.size();current++ )
+	    {
+	       status *= -1;
+	       float cells = intersections[current]/cellstep;
+               while( i <= (int)cells && i+j < ny && i < nx )
+	       {
+	          float d = intersections[current] - i*cellstep;
+		  if( current > 0 )
+		  {
+		     float d0 = i*cellstep - intersections[current-1];
+		     d = ( d < d0 ) ? d : d0;
+		  }
+	          float val = lsgrid.value(i,j+i,k);
+	          val = ( fabs(val) < d ) ? val : status*d;
+	          lsgrid.value(i,j+i,k) = val; 
+		  ++i;
+	       }
+	    }
+	    while( i+j < ny && i < nx )
+	    {
+	       float d = intersections[intersections.size()-1] - i*cellstep;
+	       float val = lsgrid.value(i,j+i,k);
+	       val = ( fabs(val) < fabs(d) ) ? val : d;
+	       lsgrid.value(i,j+i,k) = val; 
+	       ++i;
+	    }
+
+	 }
+	 meter.update();
+      }
+   }
+
+*/
+
+	SignedDistance sdf( geom );
+   	ProgressMeter meter( nx*ny*nz , "Levelset Detailed Scan");
+
+	for( int k=0;k<nz;k++ )
+	{
+	   for( int j=0;j<ny;j++ )
+   	   {
+  	      for( int i=0;i<nx;i++ )
+	      {
+	         if( fabs(lsgrid.value(i,j,k)) < sdfthreshold )
+		 {
+	            Vector P = lsgrid.evalP(i,j,k);
+		    lsgrid.value(i,j,k) = sdf.eval(P);
+		 }
+		 meter.update();
+	      }
+	   }
+	}
+}
+
+
+
+
+void lux::Geometry2Particles( const TriangleGeometry& geom, ParticleGroupA& particles )
+{
+   particles.clear();
+   ProgressMeter meter( geom.nbVertices(), "Geometry2Particles" );
+   for( size_t i=0;i<geom.nbVertices();i++ )
+   {
+      Particle p;
+      p.P() = geom.getVertex(i);
+      p.id() = i;
+      // find the maximum separation with other connected vertices
+      float max = 0;
+      int f[3];
+      for( size_t j=0;j<geom.nbFaces();j++ )
+      {
+         geom.getFace( j, f[0], f[1], f[2] );
+	 for( int k=0;k<3;k++ )
+	 {
+	    if( i == (size_t)f[k] )
+	    {
+	       float d0 = ( geom.getVertex( f[(k+1)%3] ) - geom.getVertex(f[k]) ).magnitude();
+	       float d1 = ( geom.getVertex( f[(k+2)%3] ) - geom.getVertex(f[k]) ).magnitude();
+	       max = ( max < d0 ) ? d0 : max;
+	       max = ( max < d1 ) ? d1 : max;
+	    }
+	 }
+      }
+      p.pscale() = max;
+      particles.push_back(p);
+   }
+   meter.update();
+}
